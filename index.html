@@ -9,76 +9,113 @@
     <!-- Firebase Imports -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, setDoc, getDoc, onSnapshot, updateDoc, arrayUnion, increment, collection } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // Firebase Configuration (Injected by environment or manually set)
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app';
-
+        // Variables specific to this module scope
         let db, auth, user;
         let gameUnsubscribe = null;
         let onlineGameId = null;
-        let myOnlineRole = null; // 'red' or 'black'
+        let myOnlineRole = null; 
 
-        if (firebaseConfig) {
-            const app = initializeApp(firebaseConfig);
-            auth = getAuth(app);
-            db = getFirestore(app);
+        // Firebase Configuration
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app';
 
-            // Auth Login
-            signInAnonymously(auth).then((userCredential) => {
-                user = userCredential.user;
-                console.log("Logged in as:", user.uid);
-                document.getElementById('online-status').innerText = "متصل بالخادم ✅";
-                document.getElementById('online-menu-btns').classList.remove('opacity-50', 'pointer-events-none');
-            }).catch((error) => {
-                console.error("Auth Error", error);
-                document.getElementById('online-status').innerText = "خطأ في الاتصال ❌";
-            });
+        async function initFirebase() {
+            if (!firebaseConfig) {
+                console.warn("Firebase config missing. Offline mode only.");
+                return;
+            }
+
+            try {
+                const app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                onAuthStateChanged(auth, (u) => {
+                    user = u;
+                    if (user) {
+                        console.log("Firebase Connected. User:", user.uid);
+                        const statusEl = document.getElementById('online-status');
+                        const btnsEl = document.getElementById('online-menu-btns');
+                        if(statusEl) statusEl.innerText = "متصل بالخادم ✅";
+                        if(btnsEl) btnsEl.classList.remove('opacity-50', 'pointer-events-none');
+                    }
+                });
+
+            } catch (error) {
+                console.error("Firebase Init Error:", error);
+                const statusEl = document.getElementById('online-status');
+                if(statusEl) statusEl.innerText = "خطأ في الاتصال ❌";
+            }
         }
+
+        // Initialize immediately
+        initFirebase();
 
         // --- Online Functions ---
 
         window.createGame = async function() {
-            if (!user) return alert("انتظر الاتصال بالخادم...");
-            const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
-            const gameRef = doc(db, 'artifacts', appId, 'public', 'data', 'games', roomId);
+            if (!user) return alert("جاري الاتصال بالخادم... حاول بعد قليل");
             
-            // Initial State
-            await setDoc(gameRef, {
-                lines: [],
-                triangles: [],
-                scores: { red: 0, black: 0 },
-                currentPlayer: 'red',
-                status: 'waiting', // waiting, playing
-                hostId: user.uid,
-                createdAt: new Date().toISOString()
-            });
+            try {
+                const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
+                const gameRef = doc(db, 'artifacts', appId, 'public', 'data', 'games', roomId);
+                
+                await setDoc(gameRef, {
+                    lines: [],
+                    triangles: [],
+                    scores: { red: 0, black: 0 },
+                    currentPlayer: 'red',
+                    status: 'waiting', 
+                    hostId: user.uid,
+                    createdAt: new Date().toISOString()
+                });
 
-            enterOnlineMode(roomId, 'red');
-            document.getElementById('room-code-display').innerText = roomId;
-            document.getElementById('waiting-msg').classList.remove('hidden');
-            copyToClipboard(roomId);
-            alert(`تم إنشاء الغرفة! الرمز هو: ${roomId} (تم النسخ)`);
+                enterOnlineMode(roomId, 'red');
+                document.getElementById('room-code-display').innerText = roomId;
+                document.getElementById('waiting-msg').classList.remove('hidden');
+                
+                // Copy ID (Fixed logic)
+                copyToClipboard(roomId);
+                
+                // Alert with fallback info
+                alert(`تم إنشاء الغرفة! الرمز هو: ${roomId}\n(حاولنا نسخه للحافظة تلقائياً)`);
+                
+            } catch (e) {
+                console.error("Create Game Error:", e);
+                alert("فشل إنشاء الغرفة: " + e.message);
+            }
         }
 
         window.joinGame = async function() {
-            if (!user) return alert("انتظر الاتصال بالخادم...");
+            if (!user) return alert("جاري الاتصال بالخادم...");
             const roomId = prompt("أدخل رمز الغرفة:");
             if (!roomId) return;
 
-            const gameRef = doc(db, 'artifacts', appId, 'public', 'data', 'games', roomId);
-            const docSnap = await getDoc(gameRef);
+            try {
+                const gameRef = doc(db, 'artifacts', appId, 'public', 'data', 'games', roomId);
+                const docSnap = await getDoc(gameRef);
 
-            if (docSnap.exists()) {
-                await updateDoc(gameRef, {
-                    status: 'playing',
-                    guestId: user.uid
-                });
-                enterOnlineMode(roomId, 'black');
-            } else {
-                alert("الغرفة غير موجودة!");
+                if (docSnap.exists()) {
+                    await updateDoc(gameRef, {
+                        status: 'playing',
+                        guestId: user.uid
+                    });
+                    enterOnlineMode(roomId, 'black');
+                } else {
+                    alert("الغرفة غير موجودة!");
+                }
+            } catch (e) {
+                console.error("Join Game Error:", e);
+                alert("فشل الانضمام: " + e.message);
             }
         }
 
@@ -86,58 +123,85 @@
             onlineGameId = roomId;
             myOnlineRole = role;
             window.isOnline = true;
-            window.isAIEnabled = false; // Force disable AI
+            window.isAIEnabled = false; 
             
-            // UI Updates
             document.getElementById('lobby-overlay').classList.add('hidden');
             document.getElementById('game-info-bar').classList.remove('hidden');
             document.getElementById('room-id-span').innerText = roomId;
             document.getElementById('my-role-span').innerText = role === 'red' ? "أنت: الأحمر 🔴" : "أنت: الأسود ⚫";
-            document.getElementById('ai-toggle-container').classList.add('hidden'); // Hide AI toggle
+            document.getElementById('ai-toggle-container').classList.add('hidden'); 
             
-            // Listen for updates
             const gameRef = doc(db, 'artifacts', appId, 'public', 'data', 'games', roomId);
-            gameUnsubscribe = onSnapshot(gameRef, (doc) => {
-                const data = doc.data();
-                if (data) {
-                    // Update Local State from DB
+            if (gameUnsubscribe) gameUnsubscribe();
+            
+            gameUnsubscribe = onSnapshot(gameRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
                     window.lines = data.lines || [];
                     window.triangles = data.triangles || [];
-                    window.scores = data.scores;
+                    window.scores = data.scores || { red: 0, black: 0 };
                     window.currentPlayer = data.currentPlayer;
                     
                     if (data.status === 'playing') {
                         document.getElementById('waiting-msg').classList.add('hidden');
                     }
 
-                    // Redraw
                     window.updateUI();
                     window.draw();
+                } else {
+                    alert("يبدو أن الغرفة قد أغلقت.");
+                    window.resetGame();
                 }
+            }, (error) => {
+                console.error("Snapshot Error:", error);
             });
         }
 
-        // Export functionality to update DB
         window.sendMoveToFirebase = async function(newLine, newTriangles, nextPlayer, newScores) {
             if (!onlineGameId || !user) return;
-            const gameRef = doc(db, 'artifacts', appId, 'public', 'data', 'games', onlineGameId);
-            
-            await updateDoc(gameRef, {
-                lines: window.lines, // Sync entire array for simplicity in this demo
-                triangles: window.triangles,
-                currentPlayer: nextPlayer,
-                scores: newScores
-            });
+            try {
+                const gameRef = doc(db, 'artifacts', appId, 'public', 'data', 'games', onlineGameId);
+                await updateDoc(gameRef, {
+                    lines: window.lines,
+                    triangles: window.triangles,
+                    currentPlayer: nextPlayer,
+                    scores: newScores
+                });
+            } catch (e) {
+                console.error("Sync Error:", e);
+            }
         }
         
+        // Robust Copy Function
         function copyToClipboard(text) {
-             navigator.clipboard.writeText(text).then(function() {
-                console.log('Async: Copying to clipboard was successful!');
-             }, function(err) {
-                console.error('Async: Could not copy text: ', err);
-             });
-        }
+            // Create a temporary textarea element
+            const textArea = document.createElement("textarea");
+            textArea.value = text;
+            
+            // Make it invisible but part of the document
+            textArea.style.position = "fixed";
+            textArea.style.left = "-9999px";
+            textArea.style.top = "0";
+            document.body.appendChild(textArea);
+            
+            textArea.focus();
+            textArea.select();
 
+            try {
+                const successful = document.execCommand('copy');
+                if (successful) {
+                    console.log('Async: Copying to clipboard was successful!');
+                } else {
+                    console.warn('Async: Copying failed.');
+                    prompt("تعذر النسخ التلقائي. انسخ الرمز يدوياً:", text);
+                }
+            } catch (err) {
+                console.error('Async: Could not copy text: ', err);
+                prompt("تعذر النسخ التلقائي. انسخ الرمز يدوياً:", text);
+            }
+
+            document.body.removeChild(textArea);
+        }
     </script>
 
     <style>
@@ -167,6 +231,13 @@
         }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
         .dare-box { background: repeating-linear-gradient(45deg, #fff, #fff 10px, #fdf2f8 10px, #fdf2f8 20px); }
+        .lore-text {
+            font-size: 0.8rem;
+            color: currentColor;
+            opacity: 0.8;
+            margin-bottom: 0.5rem;
+            font-style: italic;
+        }
     </style>
 </head>
 <body id="main-body" class="bg-gray-100 min-h-screen flex flex-col items-center justify-center overflow-y-auto py-4 transition-colors duration-500 text-gray-800">
@@ -174,8 +245,11 @@
     <!-- Header & Score -->
     <div class="w-full max-w-md px-4 mb-2">
         <div class="flex justify-between items-center mb-2 relative">
-             <h1 id="game-title" class="text-2xl font-bold text-center flex-1">حرب المثلثات</h1>
-             <button onclick="toggleDarkMode()" class="absolute left-0 bg-gray-200 dark:bg-gray-700 p-2 rounded-full hover:bg-gray-300 transition shadow-sm" title="الوضع الليلي">
+             <div class="flex-1 text-center">
+                 <h1 id="game-title" class="text-2xl font-bold">حرب المثلثات</h1>
+                 <p id="game-lore" class="lore-text hidden">...</p>
+             </div>
+             <button onclick="toggleDarkMode()" class="absolute left-0 top-1 bg-gray-200 dark:bg-gray-700 p-2 rounded-full hover:bg-gray-300 transition shadow-sm" title="الوضع الليلي">
                 <span id="dark-mode-icon">🌙</span>
              </button>
         </div>
@@ -213,7 +287,7 @@
         <div class="flex gap-2 mb-4 bg-white p-2 rounded-lg shadow-sm border border-gray-200" id="theme-box">
             <input type="text" id="theme-input" placeholder="اكتب ثيماً (مثلاً: فضاء، غابة)..." class="flex-1 text-sm p-2 border border-gray-300 rounded focus:outline-none focus:border-blue-500 text-right text-gray-800">
             <button onclick="generateTheme()" id="theme-btn" class="bg-gradient-to-r from-pink-500 to-orange-400 text-white text-xs font-bold px-3 rounded hover:opacity-90 transition flex items-center gap-1">
-                <span>🎨</span> <span id="theme-btn-text">تلوين</span>
+                <span>🎨</span> <span id="theme-btn-text">تلوين وقصة</span>
             </button>
         </div>
 
@@ -238,17 +312,29 @@
         <canvas id="gameCanvas"></canvas>
         
         <!-- Winner Overlay -->
-        <div id="winner-overlay" class="hidden absolute inset-0 bg-white/95 z-10 flex flex-col items-center justify-center rounded-xl backdrop-blur-sm transition-all duration-500 p-4 text-center">
+        <div id="winner-overlay" class="hidden absolute inset-0 bg-white/95 z-10 flex flex-col items-center justify-center rounded-xl backdrop-blur-sm transition-all duration-500 p-4 text-center overflow-y-auto">
             <h2 id="winner-text" class="text-4xl font-bold mb-2 text-gray-800">فاز الأحمر!</h2>
+            
+            <!-- Winner's Wish Section -->
             <div class="w-full max-w-xs mb-4 dare-box p-4 rounded-lg border-2 border-pink-200 shadow-inner">
                 <h3 class="text-sm font-bold text-pink-600 mb-2">👑 أمر الفائز</h3>
                 <input type="text" id="wish-topic" placeholder="نوع الحكم..." class="w-full text-sm p-2 mb-2 border border-pink-300 rounded focus:outline-none focus:border-pink-500 text-right text-gray-800 bg-white/80">
                 <p id="wish-text" class="text-gray-700 text-lg font-bold min-h-[3rem] flex items-center justify-center mb-2">اضغط الزر 👇</p>
                 <button onclick="generateWish()" id="wish-btn" class="w-full text-sm bg-gradient-to-r from-pink-500 to-rose-500 hover:from-pink-600 hover:to-rose-600 text-white font-bold py-2 px-4 rounded-full shadow transition transform active:scale-95">⚖️ إصدار الحكم</button>
             </div>
+
+            <!-- Epic Poem Section -->
+            <div id="recap-container" class="w-full max-w-xs mb-4 hidden">
+                <div class="bg-yellow-50 p-3 rounded-lg border border-yellow-200 text-sm text-yellow-900 italic font-serif">
+                    <p id="recap-text">...</p>
+                </div>
+            </div>
+
             <div class="flex flex-col gap-2 w-full max-w-xs">
+                <button onclick="generateRecap()" id="recap-btn" class="bg-amber-500 hover:bg-amber-600 text-white font-bold py-2 px-6 rounded-full shadow-lg transform transition hover:scale-105 active:scale-95">
+                    📜 قصيدة المعركة
+                </button>
                 <button onclick="resetGame()" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-full shadow-lg transform transition hover:scale-105 active:scale-95 w-full">لعبة جديدة</button>
-                <button onclick="consultSage('victory')" class="text-purple-600 font-bold hover:underline flex items-center justify-center gap-1 text-sm mt-2"><span>✨</span> ماذا يقول الحكيم؟</button>
             </div>
         </div>
     </div>
@@ -329,6 +415,7 @@
         const canvasContainer = document.getElementById('canvas-container');
         const scoreboard = document.getElementById('scoreboard');
         const gameTitle = document.getElementById('game-title');
+        const gameLore = document.getElementById('game-lore');
         const aiLabel = document.getElementById('ai-label');
         const themeBtn = document.getElementById('theme-btn');
         const themeInput = document.getElementById('theme-input');
@@ -338,6 +425,9 @@
         const sageResponseArea = document.getElementById('sage-response-area');
         const sageText = document.getElementById('sage-text');
         const sageBubble = document.getElementById('sage-bubble-el');
+        const recapBtn = document.getElementById('recap-btn');
+        const recapContainer = document.getElementById('recap-container');
+        const recapText = document.getElementById('recap-text');
         
         const apiKey = "AIzaSyB3NC7YCpb9XqlflOFWDglSzDHIwF-36dU"; 
         let audioCtx = null;
@@ -347,21 +437,27 @@
         const CLICK_TOLERANCE = 25;
         let GRID_SIZE = 50; 
         
-        const lightTheme = { p1: '#ef4444', p2: '#171717', bg: '#f3f4f6', canvasBg: '#ffffff', dots: '#9ca3af', text: '#1f2937' };
+        // --- SPACE THEME (DEFAULT) ---
+        const lightTheme = {
+            p1: '#0ea5e9', // Sky Blue
+            p2: '#f43f5e', // Rose
+            bg: '#0b1120', // Very dark blue (Space background)
+            canvasBg: '#1e293b', // Slate 800 (Card background)
+            dots: '#94a3b8', // Slate 400 (Stars)
+            text: '#f8fafc' // Slate 50 (Text)
+        };
         const darkTheme = { p1: '#ef4444', p2: '#000000', bg: '#111827', canvasBg: '#cbd5e1', dots: '#475569', text: '#f3f4f6' };
 
         let currentTheme = lightTheme;
         let isDarkMode = false;
         
-        // Globals attached to window for Firebase access
-        window.dots = [];
-        window.lines = []; 
-        window.triangles = []; 
-        window.currentPlayer = 'red'; 
-        window.scores = { red: 0, black: 0 };
-        window.isOnline = false;
-        window.isAIEnabled = false;
-
+        // GLOBAL INITIALIZATION WITH SAFETY
+        window.dots = window.dots || [];
+        window.lines = window.lines || []; 
+        window.triangles = window.triangles || []; 
+        window.currentPlayer = window.currentPlayer || 'red'; 
+        window.scores = window.scores || { red: 0, black: 0 };
+        
         let selectedDotIndex = -1;
         let isGameOver = false;
         let historyStack = [];
@@ -410,7 +506,7 @@
             finally { wishBtn.disabled = false; wishBtn.innerText = "🔄 حكم آخر"; }
         }
 
-        // --- GEMINI THEME GENERATOR ---
+        // --- GEMINI THEME & LORE GENERATOR ---
         window.generateTheme = async function() {
             const promptText = themeInput.value.trim();
             if (!promptText) return;
@@ -420,7 +516,13 @@
             themeBtn.disabled = true; themeBtnText.innerText = "";
             const loader = document.createElement('div'); loader.className = "loader"; themeBtn.appendChild(loader);
 
-            const systemPrompt = `Generate JSON theme: bg, canvasBg, p1, p2, dots, text. High contrast.`;
+            const systemPrompt = `
+            You are a creative UI theme & story generator. 
+            Generate a JSON object with:
+            1. Theme colors: bg, canvasBg, p1, p2, dots, text (High contrast).
+            2. 'lore': A very short (1 sentence) dramatic Arabic backstory for this battle theme.
+            Example: {"bg":"...", ..., "lore": "في عام 3000، تتصارع قبائل النيون للسيطرة على المجرة."}
+            `;
             try {
                 const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -429,8 +531,12 @@
                 const data = await response.json();
                 const newTheme = JSON.parse(data.candidates[0].content.parts[0].text);
                 applyTheme(newTheme);
+                if (newTheme.lore) {
+                    gameLore.innerText = newTheme.lore;
+                    gameLore.classList.remove('hidden');
+                }
             } catch (e) { console.error(e); } 
-            finally { themeBtn.removeChild(loader); themeBtnText.innerText = "تلوين"; themeBtn.disabled = false; }
+            finally { themeBtn.removeChild(loader); themeBtnText.innerText = "تلوين وقصة"; themeBtn.disabled = false; }
         }
 
         function applyTheme(theme) {
@@ -440,6 +546,33 @@
             scoreboard.style.backgroundColor = theme.canvasBg; scoreboard.style.color = theme.text;
             canvasContainer.style.backgroundColor = theme.canvasBg; canvas.style.backgroundColor = theme.canvasBg;
             window.draw(); window.updateUI();
+        }
+
+        // --- GEMINI EPIC RECAP ---
+        window.generateRecap = async function() {
+            if (!apiKey) return;
+            recapBtn.disabled = true;
+            recapContainer.classList.remove('hidden');
+            recapText.innerHTML = '<span class="thinking-dots">جاري نظم القصيدة</span>';
+
+            const winner = window.scores.red > window.scores.black ? "الأحمر" : "الأسود";
+            const loreContext = gameLore.innerText || "حرب المثلثات";
+            
+            const prompt = `
+            اكتب قصيدة ملحمية قصيرة جداً (أربعة أسطر فقط) أو قصة قصيرة جداً بأسلوب الحكواتي، تصف معركة انتهت بفوز ${winner} بنتيجة ${window.scores.red} مقابل ${window.scores.black}.
+            سياق المعركة (الثيم): ${loreContext}.
+            اجعلها مضحكة أو درامية بشكل مبالغ فيه.
+            `;
+
+            try {
+                const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+                });
+                const data = await response.json();
+                recapText.innerText = data.candidates[0].content.parts[0].text;
+            } catch (error) { recapText.innerText = "تعذر استحضار التاريخ..."; } 
+            finally { recapBtn.classList.add('hidden'); }
         }
 
         // --- GEMINI SAGE ---
@@ -517,8 +650,8 @@
 
         function saveState() {
             const state = {
-                lines: JSON.parse(JSON.stringify(window.lines)),
-                triangles: JSON.parse(JSON.stringify(window.triangles)),
+                lines: JSON.parse(JSON.stringify(window.lines || [])),
+                triangles: JSON.parse(JSON.stringify(window.triangles || [])),
                 currentPlayer: window.currentPlayer,
                 scores: { ...window.scores }
             };
@@ -553,6 +686,7 @@
             document.getElementById('ai-toggle-container').classList.remove('hidden');
             
             winnerOverlay.classList.add('hidden'); sageResponseArea.classList.add('hidden');
+            recapContainer.classList.add('hidden'); recapBtn.classList.remove('hidden'); recapBtn.disabled = false; recapText.innerText = "...";
             wishTopicInput.value = ""; wishText.innerText = "اكتب نوع الحكم واضغط الزر 👇";
             wishBtn.disabled = false;
             
@@ -560,8 +694,9 @@
         }
 
         function addLine(idx1, idx2) {
+            const lines = window.lines || [];
             const p1 = Math.min(idx1, idx2); const p2 = Math.max(idx1, idx2);
-            if (window.lines.some(l => (l.p1 === p1 && l.p2 === p2))) return false;
+            if (lines.some(l => (l.p1 === p1 && l.p2 === p2))) return false;
             const d1 = window.dots[p1], d2 = window.dots[p2];
             if (Math.hypot(d1.x - d2.x, d1.y - d2.y) > GRID_SIZE * 1.3) return false;
 
@@ -582,8 +717,6 @@
 
             // Sync if Online
             if (window.isOnline) {
-                // If I made the move, I update the DB. 
-                // Note: The UI updates optimistically, but the real truth comes from DB listener
                 window.sendMoveToFirebase(window.lines, window.triangles, nextPlayer, window.scores);
             } else {
                 window.currentPlayer = nextPlayer;
@@ -653,8 +786,13 @@
         }
 
         window.updateUI = function() {
-            scoreRedEl.innerText = window.scores.red;
-            scoreBlackEl.innerText = window.scores.black;
+            // FIX: Add safety check for undefined scores
+            if (!window.scores) {
+                window.scores = { red: 0, black: 0 };
+            }
+
+            if (scoreRedEl) scoreRedEl.innerText = window.scores.red;
+            if (scoreBlackEl) scoreBlackEl.innerText = window.scores.black;
 
             p1Panel.style.borderColor = window.currentPlayer === 'red' ? currentTheme.p1 : 'transparent';
             p2Panel.style.borderColor = window.currentPlayer === 'black' ? currentTheme.p2 : 'transparent';
@@ -672,8 +810,17 @@
 
         window.draw = function() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // FIX: Re-initialize if undefined
+            if (!window.triangles) window.triangles = [];
+            if (!window.lines) window.lines = [];
+            if (!window.dots) window.dots = [];
+
             window.triangles.forEach(t => {
                 const d1 = window.dots[t.p1], d2 = window.dots[t.p2], d3 = window.dots[t.p3];
+                // Extra safety
+                if (!d1 || !d2 || !d3) return;
+
                 ctx.beginPath(); ctx.moveTo(d1.x, d1.y); ctx.lineTo(d2.x, d2.y); ctx.lineTo(d3.x, d3.y); ctx.closePath();
                 const baseColor = t.color === 'red' ? currentTheme.p1 : currentTheme.p2;
                 ctx.fillStyle = baseColor; ctx.globalAlpha = 0.4; ctx.fill();
@@ -682,6 +829,8 @@
             ctx.lineWidth = 4; ctx.lineCap = 'round';
             window.lines.forEach(l => {
                 const d1 = window.dots[l.p1], d2 = window.dots[l.p2];
+                if (!d1 || !d2) return;
+
                 ctx.beginPath(); ctx.moveTo(d1.x, d1.y); ctx.lineTo(d2.x, d2.y);
                 ctx.strokeStyle = l.color === 'red' ? currentTheme.p1 : currentTheme.p2; ctx.stroke();
             });
@@ -733,7 +882,11 @@
         canvas.addEventListener('touchstart', handleInput, {passive: false});
         aiToggle.addEventListener('change', window.resetGame);
         window.addEventListener('resize', resizeCanvas);
-        resizeCanvas(); window.updateUI();
+        resizeCanvas(); 
+        
+        // APPLY DEFAULT THEME AT START
+        applyTheme(lightTheme);
+        window.updateUI();
     </script>
 </body>
 </html>
